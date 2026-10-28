@@ -38,6 +38,9 @@ func main() {
 	reload := flag.Duration("reload", 0, "Cluster only: how often to reload the slot map; 0 keeps the go-redis default of 60s")
 	run := flag.String("run", strconv.FormatInt(time.Now().Unix(), 36), "key namespace; pass an earlier run's value to keep counting on its keys")
 	flag.Parse()
+	if *reload > 0 && *master != "" {
+		log.Fatal("-reload is for Redis Cluster and cannot be combined with -master")
+	}
 
 	opt := &redis.UniversalOptions{
 		Addrs:        strings.Split(*addrs, ","),
