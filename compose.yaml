@@ -6,6 +6,9 @@
 # host cannot always reach. Run clients inside the compose network:
 #   docker compose run --rm hammer -addrs sentinel1:26379 -master mymaster
 
+# The Sentinel setup uses fixed IP addresses, not hostnames. Docker drops a
+# stopped container's name from DNS, and Sentinel then records that node with
+# an empty address. See docs/experiments.md.
 x-sentinel: &sentinel
   image: redis:8
   profiles: [sentinel]
@@ -16,8 +19,7 @@ x-sentinel: &sentinel
     - -c
     - |
       cat > /tmp/sentinel.conf <<EOF
-      sentinel resolve-hostnames yes
-      sentinel monitor mymaster primary 6379 2
+      sentinel monitor mymaster 172.30.0.10 6379 2
       sentinel down-after-milliseconds mymaster 5000
       sentinel failover-timeout mymaster 10000
       EOF
@@ -34,23 +36,34 @@ x-node: &node
 services:
   redis:
     image: redis:8
+    # Extra server flags, e.g. REDIS_ARGS="--appendonly yes" docker compose up -d
+    command: redis-server ${REDIS_ARGS:-}
     ports:
       - "6379:6379"
 
   primary:
     image: redis:8
     profiles: [sentinel]
+    networks: { default: { ipv4_address: 172.30.0.10 } }
   replica1:
     image: redis:8
     profiles: [sentinel]
-    command: redis-server --replicaof primary 6379
+    command: redis-server --replicaof 172.30.0.10 6379
+    networks: { default: { ipv4_address: 172.30.0.11 } }
   replica2:
     image: redis:8
     profiles: [sentinel]
-    command: redis-server --replicaof primary 6379
-  sentinel1: *sentinel
-  sentinel2: *sentinel
-  sentinel3: *sentinel
+    command: redis-server --replicaof 172.30.0.10 6379
+    networks: { default: { ipv4_address: 172.30.0.12 } }
+  sentinel1:
+    <<: *sentinel
+    networks: { default: { ipv4_address: 172.30.0.21 } }
+  sentinel2:
+    <<: *sentinel
+    networks: { default: { ipv4_address: 172.30.0.22 } }
+  sentinel3:
+    <<: *sentinel
+    networks: { default: { ipv4_address: 172.30.0.23 } }
 
   node1: *node
   node2: *node
@@ -86,6 +99,13 @@ services:
       - go-mod:/go/pkg/mod
       - go-build:/root/.cache/go-build
     entrypoint: [go, run, ./cmd/hammer]
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25 # dynamic addresses, clear of the fixed ones
 
 volumes:
   go-mod:
