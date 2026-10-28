@@ -175,6 +175,46 @@ docker compose up -d
 REDIS_ADDR=localhost:6379 go test -race ./...
 ```
 
+### Load testing with hammer
+
+`cmd/hammer` runs concurrent requests through a limiter and prints what
+happened every second:
+
+```sh
+go run ./cmd/hammer -algo tb -rate 10 -limit 10 -keys 10 -c 50 -d 30s
+```
+
+```
+tb, 10 keys, 50 workers: expect about 100 allowed/s
+
+   1s  allowed    170  rejected   24626  errors      0
+   2s  allowed    100  rejected   35797  errors      0
+```
+
+The first second is higher because every bucket starts full. Run
+`go run ./cmd/hammer -h` for all flags.
+
+### Sentinel and Cluster
+
+`compose.yaml` has two more profiles:
+
+```sh
+docker compose --profile sentinel up -d   # primary, 2 replicas, 3 Sentinels
+docker compose --profile cluster up -d    # 3 primaries, 3 replicas
+```
+
+Both hand out container IP addresses to clients, and the host cannot always
+reach those. Run hammer inside the compose network instead:
+
+```sh
+docker compose run --rm hammer -addrs sentinel1:26379,sentinel2:26379 -master mymaster
+docker compose run --rm hammer -addrs node1:6379,node2:6379,node3:6379
+```
+
+The cluster needs a few seconds after `up` to assign slots. Until
+`docker compose exec node1 redis-cli cluster info` shows `cluster_state:ok`,
+requests fail with `CLUSTERDOWN`.
+
 ## License
 
 MIT

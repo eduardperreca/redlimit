@@ -1,5 +1,92 @@
+# docker compose up -d                       single Redis on localhost:6379
+# docker compose --profile sentinel up -d    primary, 2 replicas, 3 Sentinels
+# docker compose --profile cluster up -d     6-node Redis Cluster (3 primaries, 3 replicas)
+#
+# Sentinel and Cluster nodes announce their container addresses, which the
+# host cannot always reach. Run clients inside the compose network:
+#   docker compose run --rm hammer -addrs sentinel1:26379 -master mymaster
+
+x-sentinel: &sentinel
+  image: redis:8
+  profiles: [sentinel]
+  depends_on: [primary, replica1, replica2]
+  # Sentinel rewrites its config file at runtime, so it needs a writable copy.
+  command:
+    - sh
+    - -c
+    - |
+      cat > /tmp/sentinel.conf <<EOF
+      sentinel resolve-hostnames yes
+      sentinel monitor mymaster primary 6379 2
+      sentinel down-after-milliseconds mymaster 5000
+      sentinel failover-timeout mymaster 10000
+      EOF
+      exec redis-sentinel /tmp/sentinel.conf
+
+x-node: &node
+  image: redis:8
+  profiles: [cluster]
+  command: redis-server --cluster-enabled yes --cluster-node-timeout 5000
+  healthcheck:
+    test: redis-cli ping
+    interval: 1s
+
 services:
   redis:
     image: redis:8
     ports:
       - "6379:6379"
+
+  primary:
+    image: redis:8
+    profiles: [sentinel]
+  replica1:
+    image: redis:8
+    profiles: [sentinel]
+    command: redis-server --replicaof primary 6379
+  replica2:
+    image: redis:8
+    profiles: [sentinel]
+    command: redis-server --replicaof primary 6379
+  sentinel1: *sentinel
+  sentinel2: *sentinel
+  sentinel3: *sentinel
+
+  node1: *node
+  node2: *node
+  node3: *node
+  node4: *node
+  node5: *node
+  node6: *node
+  cluster-init:
+    image: redis:8
+    profiles: [cluster]
+    depends_on:
+      node1: { condition: service_healthy }
+      node2: { condition: service_healthy }
+      node3: { condition: service_healthy }
+      node4: { condition: service_healthy }
+      node5: { condition: service_healthy }
+      node6: { condition: service_healthy }
+    # redis-cli --cluster create wants IP addresses, not hostnames.
+    command:
+      - sh
+      - -c
+      - |
+        redis-cli -h node1 cluster info | grep -q cluster_state:ok && exit 0
+        redis-cli --cluster create --cluster-replicas 1 --cluster-yes \
+          $$(for n in 1 2 3 4 5 6; do echo $$(getent hosts node$$n | cut -d' ' -f1):6379; done)
+
+  hammer:
+    image: golang:1.26
+    profiles: [tools]
+    working_dir: /src
+    volumes:
+      - .:/src
+      - go-mod:/go/pkg/mod
+      - go-build:/root/.cache/go-build
+    entrypoint: [go, run, ./cmd/hammer]
+
+volumes:
+  go-mod:
+  go-build:
