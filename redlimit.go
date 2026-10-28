@@ -56,6 +56,14 @@ func (o options) key(key, algo string) string {
 	return o.prefix + ":{" + key + "}:" + algo
 }
 
+// checkWindow rejects settings that would silently disable limiting:
+// PEXPIRE takes milliseconds, and a TTL of 0 deletes the key.
+func checkWindow(limit int, window time.Duration) {
+	if limit < 1 || window < time.Millisecond {
+		panic("redlimit: window limiters need limit >= 1 and window >= 1ms")
+	}
+}
+
 func (o options) failed(limit int) Result {
 	return Result{Allowed: !o.failClosed, Limit: limit}
 }

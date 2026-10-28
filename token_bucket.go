@@ -22,7 +22,11 @@ type TokenBucket struct {
 
 // NewTokenBucket returns a limiter that refills rate tokens per second, up to burst.
 // It needs Redis 7.0 or later: older versions reject writes after TIME in a script.
+// It panics if rate <= 0 or burst < 1.
 func NewTokenBucket(rdb redis.UniversalClient, rate float64, burst int, opts ...Option) *TokenBucket {
+	if !(rate > 0) || burst < 1 { // !(rate > 0) also catches NaN
+		panic("redlimit: token bucket needs rate > 0 and burst >= 1")
+	}
 	return &TokenBucket{rdb: rdb, rate: rate, burst: burst, opts: newOptions(opts)}
 }
 
@@ -55,6 +59,7 @@ redis.call('PEXPIRE', KEYS[1], math.max(1, math.ceil(full / 1000)))
 return {allowed, math.floor(tokens), full, retry}
 `)
 
+// Allow implements Limiter.
 func (l *TokenBucket) Allow(ctx context.Context, key string) (Result, error) {
 	// Run sends EVALSHA and falls back to EVAL when Redis has not cached the
 	// script yet, so the script body crosses the network only once per node.

@@ -23,10 +23,13 @@ type SlidingWindow struct {
 
 // NewSlidingWindow returns a limiter that allows limit requests in any
 // window-long span. Memory grows with limit: one sorted set entry per request.
+// It panics if limit < 1 or window < 1ms.
 func NewSlidingWindow(rdb redis.UniversalClient, limit int, window time.Duration, opts ...Option) *SlidingWindow {
+	checkWindow(limit, window)
 	return &SlidingWindow{rdb: rdb, limit: limit, window: window, opts: newOptions(opts)}
 }
 
+// Allow implements Limiter.
 func (l *SlidingWindow) Allow(ctx context.Context, key string) (Result, error) {
 	k := l.opts.key(key, "sw")
 	now := time.Now().UnixMicro()
@@ -64,9 +67,9 @@ func (l *SlidingWindow) Allow(ctx context.Context, key string) (Result, error) {
 	// A rejected request must not use up the limit, so take it back out. Until
 	// then it is counted, and a concurrent request can be rejected because of
 	// it. That errs on the strict side: it never lets more than limit through.
-	if err := l.rdb.ZRem(ctx, k, member).Err(); err != nil {
-		return res, err
-	}
+	// If ZREM fails, the entry ages out with the window like any other; the
+	// rejection itself is still correct, so the error is not returned.
+	_ = l.rdb.ZRem(ctx, k, member).Err()
 	if z := oldest.Val(); len(z) > 0 {
 		res.RetryAfter = time.Duration(int64(z[0].Score)+l.window.Microseconds()-now) * time.Microsecond
 	}

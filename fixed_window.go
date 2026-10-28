@@ -21,11 +21,13 @@ type FixedWindow struct {
 }
 
 // NewFixedWindow returns a limiter that allows limit requests per window.
-// It needs Redis 7.0 or later.
+// It needs Redis 7.0 or later. It panics if limit < 1 or window < 1ms.
 func NewFixedWindow(rdb redis.UniversalClient, limit int, window time.Duration, opts ...Option) *FixedWindow {
+	checkWindow(limit, window)
 	return &FixedWindow{rdb: rdb, limit: limit, window: window, opts: newOptions(opts)}
 }
 
+// Allow implements Limiter.
 func (l *FixedWindow) Allow(ctx context.Context, key string) (Result, error) {
 	k := l.opts.key(key, "fw")
 
