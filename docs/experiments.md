@@ -105,3 +105,63 @@ rejoins as a replica of the new one each time.
 
 If Sentinel runs where node names can stop resolving (containers,
 Kubernetes pods), use stable addresses or make sure the names always resolve.
+
+## Cluster failover
+
+Setup: six nodes, three primaries with one replica each,
+`cluster-node-timeout 5000`. Fixed window, 100 requests per key, 30 keys
+spread over all three primaries. One primary is killed about 10 seconds in.
+
+```sh
+docker compose --profile cluster up -d
+docker compose run --rm hammer -addrs node1:6379,node2:6379,node3:6379 \
+  -algo fw -limit 100 -window 10m -keys 30 -d 40s -client-timeout 100ms
+docker compose kill node2   # pick a primary: redis-cli -h node1 cluster nodes
+```
+
+In every run a replica took over the dead primary's slots, and the total
+stayed at exactly 3000 allowed: no counter was lost. The client was the
+problem.
+
+### The client keeps using the dead node
+
+| Client settings                          | Back to normal after the kill |
+| ---------------------------------------- | ----------------------------- |
+| go-redis defaults                        | not within 25 s               |
+| 100ms `DialTimeout`/`ReadTimeout`        | not within 25 s               |
+| 100ms context timeout per request        | 48 s                          |
+| 100ms client timeouts, slot map reloaded every second | 12 s             |
+
+With the defaults, nothing was served for 20 seconds, then requests for the
+dead primary's slots failed with `dial tcp ...: i/o timeout` until the run
+ended. With timeouts, those requests failed fast, but kept failing.
+
+A Cluster client keeps a map of which node owns which slot. go-redis rebuilds
+it when a node answers `MOVED`, and otherwise every
+`ClusterStateReloadInterval`, which defaults to 60 seconds. A dead node never
+answers `MOVED`, so the client keeps sending that slot's requests to it. The
+48-second run is the one where the 60-second reload happened to land inside
+the run: the client had loaded the map at startup, 12 seconds before the kill.
+
+Lowering the interval fixes it:
+
+```go
+rdb := redis.NewClusterClient(&redis.ClusterOptions{
+	Addrs:                      addrs,
+	DialTimeout:                100 * time.Millisecond,
+	ReadTimeout:                100 * time.Millisecond,
+	WriteTimeout:               100 * time.Millisecond,
+	ClusterStateReloadInterval: time.Second,
+})
+```
+
+`redis.UniversalOptions` has no field for it, so build a `ClusterClient`
+directly. A reload is one `CLUSTER SLOTS` call, cheap to run every second.
+
+### Requests for other slots slow down too
+
+Only a third of the keys lived on the dead primary, yet throughput fell from
+about 140,000 to about 1,000 checks per second. Each request for a dead slot
+held a worker for the full timeout, and with random keys every worker soon
+hit one. In a server, the equivalent is request goroutines piling up on the
+limiter. Short timeouts keep that bounded.
