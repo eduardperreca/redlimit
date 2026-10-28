@@ -35,16 +35,24 @@ func main() {
 	dur := flag.Duration("d", 30*time.Second, "how long to run")
 	timeout := flag.Duration("timeout", 0, "per-request context timeout; 0 means none")
 	clientTimeout := flag.Duration("client-timeout", 0, "go-redis dial, read and write timeout; 0 keeps the go-redis defaults")
+	reload := flag.Duration("reload", 0, "Cluster only: how often to reload the slot map; 0 keeps the go-redis default of 60s")
 	run := flag.String("run", strconv.FormatInt(time.Now().Unix(), 36), "key namespace; pass an earlier run's value to keep counting on its keys")
 	flag.Parse()
 
-	rdb := redis.NewUniversalClient(&redis.UniversalOptions{
+	opt := &redis.UniversalOptions{
 		Addrs:        strings.Split(*addrs, ","),
 		MasterName:   *master,
 		DialTimeout:  *clientTimeout,
 		ReadTimeout:  *clientTimeout,
 		WriteTimeout: *clientTimeout,
-	})
+	}
+	rdb := redis.NewUniversalClient(opt)
+	if *reload > 0 {
+		// UniversalOptions has no field for the reload interval.
+		copt := opt.Cluster()
+		copt.ClusterStateReloadInterval = *reload
+		rdb = redis.NewClusterClient(copt)
+	}
 	defer rdb.Close()
 
 	var lim redlimit.Limiter
