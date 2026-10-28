@@ -72,16 +72,26 @@ Every response that went through the limiter carries:
 
 | Header                | Value                                      |
 | --------------------- | ------------------------------------------ |
-| `RateLimit-Limit`     | requests allowed per window                |
-| `RateLimit-Remaining` | requests left in the current window        |
-| `RateLimit-Reset`     | seconds until the window resets            |
-| `Retry-After`         | seconds to wait, on `429` responses only   |
+| `RateLimit-Limit`     | requests per window, or burst for the token bucket |
+| `RateLimit-Remaining` | requests that can be made right now                |
+| `RateLimit-Reset`     | seconds until the full limit is available again    |
+| `Retry-After`         | seconds to wait, on `429` responses only           |
 
 The `RateLimit-*` names follow earlier drafts of
 [draft-ietf-httpapi-ratelimit-headers](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/).
 Seconds are rounded up.
 
 ## Algorithms
+
+|                | Burst at most  | Redis memory per key   | Atomicity      | Clock          |
+| -------------- | -------------- | ---------------------- | -------------- | -------------- |
+| Fixed window   | `2 * limit`    | one counter            | single command | none (TTL)     |
+| Sliding window | `limit`        | one entry per request  | `MULTI`/`EXEC` | client         |
+| Token bucket   | `burst`        | one hash, two fields   | Lua script     | Redis `TIME`   |
+
+Fixed window is the cheapest. Sliding window is exact, but memory grows with the
+limit, so keep it for small limits. Token bucket allows short bursts while
+holding an average rate, and is the usual choice for APIs.
 
 ### Fixed window
 
@@ -105,6 +115,52 @@ back and the window would never close for a client that keeps sending.
 The cost of the simplicity: a client can send `limit` requests at the end of one
 window and `limit` more at the start of the next, so up to `2 * limit` in a
 short burst.
+
+### Sliding window
+
+`NewSlidingWindow(rdb, limit, window)`
+
+Each request is an entry in a sorted set, scored by its timestamp. A request is
+allowed if fewer than `limit` entries are younger than `window`.
+
+```
+MULTI
+ZREMRANGEBYSCORE rl:{key}:sw -inf <now - window>
+ZADD             rl:{key}:sw <now> <now>-<random>
+ZCARD            rl:{key}:sw
+ZRANGE           rl:{key}:sw 0 0 WITHSCORES
+PEXPIRE          rl:{key}:sw <window>
+EXEC
+```
+
+`MULTI` queues the commands and runs them with nothing else in between, but it
+cannot use one command's result in the next. So the request is added before it
+is known to be allowed, and removed with a separate `ZREM` if it was rejected.
+In the moment between the two, a concurrent request sees one entry too many and
+can be rejected too. The limiter can be stricter than `limit` under contention,
+never looser.
+
+`now` comes from the application server's clock. If two servers disagree by a
+second, one of them sees entries a second older than they are. Keep the clocks
+in sync with NTP, or use the token bucket.
+
+### Token bucket
+
+`NewTokenBucket(rdb, rate, burst)`
+
+Each key has a bucket holding up to `burst` tokens, refilled at `rate` tokens
+per second. A request takes one token, or is rejected if there is none.
+
+The state is a hash with the token count and the time of the last update. The
+refill depends on the previous state, which `MULTI` cannot express, so the
+logic runs as a Lua script. Redis runs a script atomically. The script is sent
+once with `EVAL`. After that, the client calls it by SHA1 with `EVALSHA`.
+
+The script reads the time with Redis `TIME`, so all application servers share
+one clock.
+
+The key expires when the bucket would be full again. A missing key reads as a
+full bucket.
 
 ## Keys
 

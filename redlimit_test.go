@@ -23,7 +23,9 @@ func TestConcurrentRequests(t *testing.T) {
 	defer rdb.Close()
 
 	limiters := map[string]Limiter{
-		"fixed window": NewFixedWindow(rdb, 10, time.Minute),
+		"fixed window":   NewFixedWindow(rdb, 10, time.Minute),
+		"sliding window": NewSlidingWindow(rdb, 10, time.Minute),
+		"token bucket":   NewTokenBucket(rdb, 0.01, 10),
 	}
 	for name, lim := range limiters {
 		t.Run(name, func(t *testing.T) {
