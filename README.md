@@ -66,6 +66,27 @@ unchecked is worse than rejecting it, as with login attempts.
 middleware logs them with `log/slog` and responds `503 Service Unavailable` in
 fail-closed mode.
 
+## Timeouts
+
+Fail-open only helps if `Allow` returns. With go-redis defaults, a dead
+primary makes every call hang for seconds while the client retries. Give the
+client short timeouts:
+
+```go
+rdb := redis.NewClient(&redis.Options{
+	Addr:         "localhost:6379",
+	DialTimeout:  100 * time.Millisecond,
+	ReadTimeout:  100 * time.Millisecond,
+	WriteTimeout: 100 * time.Millisecond,
+})
+```
+
+With Redis Cluster, also set `ClusterStateReloadInterval` to about a second.
+Otherwise the client keeps sending requests to a dead primary for up to
+60 seconds after a replica has replaced it.
+
+[docs/experiments.md](docs/experiments.md) has the measurements behind this.
+
 ## HTTP headers
 
 Every response that went through the limiter carries:
