@@ -4,20 +4,29 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
 // Middleware limits requests by the key that keyFunc extracts from each request.
+// Requests for which keyFunc returns "" all share one limit.
 //
 // Rejected requests get 429 Too Many Requests with a Retry-After header.
-// If the limiter fails, the error is logged with slog and the request either
-// passes or gets 503 Service Unavailable, depending on the limiter's fail mode.
+// If the limiter fails, the request either passes or gets 503 Service
+// Unavailable, depending on the limiter's fail mode. Errors are logged with
+// slog, at most once per second: during an outage every request fails.
 func Middleware(l Limiter, keyFunc func(*http.Request) string) func(http.Handler) http.Handler {
+	var lastLog, skipped atomic.Int64
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			res, err := l.Allow(r.Context(), keyFunc(r))
 			if err != nil {
-				slog.ErrorContext(r.Context(), "redlimit: limiter failed", "err", err)
+				now := time.Now().UnixNano()
+				if last := lastLog.Load(); now-last >= int64(time.Second) && lastLog.CompareAndSwap(last, now) {
+					slog.ErrorContext(r.Context(), "redlimit: limiter failed", "err", err, "suppressed", skipped.Swap(0))
+				} else {
+					skipped.Add(1)
+				}
 				if !res.Allowed {
 					http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 					return
