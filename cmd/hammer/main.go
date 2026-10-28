@@ -46,12 +46,14 @@ func main() {
 		ReadTimeout:  *clientTimeout,
 		WriteTimeout: *clientTimeout,
 	}
-	rdb := redis.NewUniversalClient(opt)
+	var rdb redis.UniversalClient
 	if *reload > 0 {
 		// UniversalOptions has no field for the reload interval.
 		copt := opt.Cluster()
 		copt.ClusterStateReloadInterval = *reload
 		rdb = redis.NewClusterClient(copt)
+	} else {
+		rdb = redis.NewUniversalClient(opt)
 	}
 	defer rdb.Close()
 
@@ -88,8 +90,8 @@ func main() {
 				switch {
 				case ctx.Err() != nil:
 				case err != nil:
+					lastErr.Store(err.Error()) // before Add: the ticker reads it once the count moves
 					failed.Add(1)
-					lastErr.Store(err.Error())
 					time.Sleep(10 * time.Millisecond) // don't spin while Redis is down
 				case res.Allowed:
 					allowed.Add(1)
