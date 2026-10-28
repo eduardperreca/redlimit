@@ -6,7 +6,8 @@ Rate limiting for Go, backed by Redis.
 go get github.com/eduardperreca/redlimit
 ```
 
-Requires Redis 7.0 or later. Valkey works too, since only standard commands are used.
+Requires Go 1.25 and Redis 7.0 or later. Tested with Redis 7.0, Redis 8 and
+Valkey 8.
 
 ## Usage
 
@@ -207,7 +208,7 @@ go run ./cmd/hammer -algo tb -rate 10 -limit 10 -keys 10 -c 50 -d 30s
 ```
 
 ```
-tb, 10 keys, 50 workers: expect about 100 allowed/s
+run tnmoo5: tb, 10 keys, 50 workers: expect about 100 allowed/s
 
    1s  allowed    170  rejected   24626  errors      0
    2s  allowed    100  rejected   35797  errors      0
