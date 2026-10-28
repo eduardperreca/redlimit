@@ -25,8 +25,9 @@ docker compose kill primary   # in another terminal, while hammer runs
 Across three runs and four failovers, the total was always exactly 1000
 allowed requests. Replication is asynchronous, so a write the primary
 acknowledged but had not yet sent to a replica is lost when the primary dies.
-For a rate limiter that means a few increments can disappear and the same
-number of extra requests get through. It did not show up here.
+For a rate limiter that means a few increments can disappear, and if that
+takes a counter back under its limit, extra requests get through. It did not
+show up here.
 
 ### Without a timeout, requests hang
 
@@ -165,3 +166,72 @@ about 140,000 to about 1,000 checks per second. Each request for a dead slot
 held a worker for the full timeout, and with random keys every worker soon
 hit one. In a server, the equivalent is request goroutines piling up on the
 limiter. Short timeouts keep that bounded.
+
+## Eviction
+
+Setup: a single Redis with `maxmemory 3mb`, filled up front with about 2,000
+keys of 200 bytes and no TTL, written by `redis-benchmark`. Then a fixed window
+of 5 requests per key over 2,000 keys for 10 seconds, so exactly 10,000
+requests should be allowed.
+
+```sh
+redis-cli config set maxmemory 3mb
+redis-cli config set maxmemory-policy volatile-lru
+redis-benchmark -t set -n 100000 -r 100000 -d 200 -q
+go run ./cmd/hammer -algo fw -limit 5 -window 10m -keys 2000 -d 10s
+```
+
+| `maxmemory-policy` | Allowed | Errors | Limiter keys left |
+| ------------------ | ------- | ------ | ----------------- |
+| `allkeys-lru`      | 10,000  | 0      | 2,000             |
+| `noeviction`       | 10,000  | 2,418  | 2,000             |
+| `volatile-lru`     | 12,085  | 3,861  | 2,000             |
+
+The errors were all
+`OOM command not allowed when used memory > 'maxmemory'`.
+
+`allkeys-lru` evicted the filler, which nobody was reading, and the limiter
+was exact.
+
+`noeviction` refused writes once memory was full, so creating a new counter
+failed. With fail-open, those 2,418 requests would have gone through unchecked.
+
+`volatile-lru` only evicts keys that have a TTL. The filler had none and every
+limiter key had one, so Redis evicted the limiter's own counters. Each evicted
+counter started again from zero, which let 2,085 extra requests through. When
+it ran out of keys with a TTL, writes failed with OOM like `noeviction`.
+
+`volatile-*` policies are a common choice when Redis holds a cache with TTLs
+next to data that must not be evicted. A rate limiter's keys always have a
+TTL, so they look like cache to Redis. Give the limiter its own Redis, or use
+an `allkeys-*` policy and enough memory.
+
+## Persistence
+
+Setup: a single Redis. A fixed window of 100 requests per key over 10 keys
+uses up every key, then Redis is killed with `SIGKILL` and started again, and
+the same keys are hit again.
+
+```sh
+REDIS_ARGS="--appendonly yes" docker compose up -d --force-recreate redis
+go run ./cmd/hammer -algo fw -limit 100 -window 10m -keys 10 -d 3s -run p1
+docker compose kill redis && docker compose start redis
+go run ./cmd/hammer -algo fw -limit 100 -window 10m -keys 10 -d 3s -run p1
+```
+
+| Configuration                    | Keys after restart | Allowed after restart |
+| -------------------------------- | ------------------ | --------------------- |
+| default (`save 3600 1 300 100 60 10000`, no AOF) | 0  | 1,000 |
+| `appendonly yes` (`appendfsync everysec`)        | 10 | 0     |
+
+With the default configuration, Redis writes an RDB snapshot at most once a
+minute, and on a clean shutdown, which `SIGKILL` skips. The counters were
+seconds old when Redis died, so none had been saved and every client got a
+fresh window.
+
+With the append-only file, every write is logged and flushed to disk once a
+second. The counters survived and the clients stayed limited.
+
+Losing counters on a crash lets each client through one extra window. For
+most APIs that is acceptable, and without AOF Redis does not have to append
+every request to a file. If a reset must not happen, as with login attempts, turn AOF on.

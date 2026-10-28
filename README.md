@@ -85,7 +85,8 @@ With Redis Cluster, also set `ClusterStateReloadInterval` to about a second.
 Otherwise the client keeps sending requests to a dead primary for up to
 60 seconds after a replica has replaced it.
 
-[docs/experiments.md](docs/experiments.md) has the measurements behind this.
+[docs/experiments.md](docs/experiments.md) has the measurements behind this, and
+what eviction policies and persistence settings do to the counters.
 
 ## HTTP headers
 
