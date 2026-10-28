@@ -42,7 +42,9 @@ local now = t[1] * 1000000 + t[2]
 local b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
 local tokens = tonumber(b[1]) or burst
 local ts = tonumber(b[2]) or now
-tokens = math.min(burst, tokens + (now - ts) / 1000000 * rate)
+-- TIME can go backwards: NTP can step the clock, and a failover can move the
+-- key to a node whose clock is behind. Treat that as no time passing.
+tokens = math.min(burst, tokens + math.max(0, now - ts) / 1000000 * rate)
 
 local allowed = 0
 local retry = 0
