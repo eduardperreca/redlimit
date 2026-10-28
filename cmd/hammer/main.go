@@ -33,11 +33,17 @@ func main() {
 	keys := flag.Int("keys", 10, "number of distinct keys")
 	workers := flag.Int("c", 50, "concurrent workers")
 	dur := flag.Duration("d", 30*time.Second, "how long to run")
+	timeout := flag.Duration("timeout", 0, "per-request context timeout; 0 means none")
+	clientTimeout := flag.Duration("client-timeout", 0, "go-redis dial, read and write timeout; 0 keeps the go-redis defaults")
+	run := flag.String("run", strconv.FormatInt(time.Now().Unix(), 36), "key namespace; pass an earlier run's value to keep counting on its keys")
 	flag.Parse()
 
 	rdb := redis.NewUniversalClient(&redis.UniversalOptions{
-		Addrs:      strings.Split(*addrs, ","),
-		MasterName: *master,
+		Addrs:        strings.Split(*addrs, ","),
+		MasterName:   *master,
+		DialTimeout:  *clientTimeout,
+		ReadTimeout:  *clientTimeout,
+		WriteTimeout: *clientTimeout,
 	})
 	defer rdb.Close()
 
@@ -56,15 +62,13 @@ func main() {
 	default:
 		log.Fatalf("unknown -algo %q", *algo)
 	}
-	fmt.Printf("%s, %d keys, %d workers: expect about %.0f allowed/s\n\n", *algo, *keys, *workers, perSec*float64(*keys))
+	fmt.Printf("run %s: %s, %d keys, %d workers: expect about %.0f allowed/s\n\n", *run, *algo, *keys, *workers, perSec*float64(*keys))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, *dur)
 	defer cancel()
 
-	// A fresh prefix per run, so counters left by an earlier run do not count.
-	run := strconv.FormatInt(time.Now().Unix(), 36)
 	var allowed, rejected, failed atomic.Int64
 	var lastErr atomic.Value
 
@@ -72,7 +76,7 @@ func main() {
 	for range *workers {
 		wg.Go(func() {
 			for ctx.Err() == nil {
-				res, err := lim.Allow(ctx, "hammer:"+run+":"+strconv.Itoa(rand.IntN(*keys)))
+				res, err := allow(ctx, lim, "hammer:"+*run+":"+strconv.Itoa(rand.IntN(*keys)), *timeout)
 				switch {
 				case ctx.Err() != nil:
 				case err != nil:
@@ -109,4 +113,13 @@ func main() {
 
 	secs := time.Since(start).Seconds()
 	fmt.Printf("\ntotal  allowed %d (%.0f/s)  rejected %d  errors %d\n", allowed.Load(), float64(allowed.Load())/secs, rejected.Load(), failed.Load())
+}
+
+func allow(ctx context.Context, lim redlimit.Limiter, key string, timeout time.Duration) (redlimit.Result, error) {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	return lim.Allow(ctx, key)
 }
