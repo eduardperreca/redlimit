@@ -1,5 +1,8 @@
 # redlimit
 
+[![ci](https://github.com/eduardperreca/redlimit/actions/workflows/ci.yml/badge.svg)](https://github.com/eduardperreca/redlimit/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/eduardperreca/redlimit.svg)](https://pkg.go.dev/github.com/eduardperreca/redlimit)
+
 Rate limiting for Go, backed by Redis.
 
 ```sh
@@ -64,8 +67,8 @@ lim := redlimit.NewFixedWindow(rdb, 5, time.Minute, redlimit.FailClosed())
 unchecked is worse than rejecting it, as with login attempts.
 
 `Allow` always returns the error, so you can log or count failures. The
-middleware logs them with `log/slog` and responds `503 Service Unavailable` in
-fail-closed mode.
+middleware logs them with `log/slog`, at most once per second with a count of
+the ones it skipped, and responds `503 Service Unavailable` in fail-closed mode.
 
 ## Timeouts
 
@@ -91,7 +94,8 @@ what eviction policies and persistence settings do to the counters.
 
 ## HTTP headers
 
-Every response that went through the limiter carries:
+Every response the limiter decided on carries the headers below. When the
+limiter fails, they are left out.
 
 | Header                | Value                                      |
 | --------------------- | ------------------------------------------ |
@@ -161,7 +165,8 @@ cannot use one command's result in the next. So the request is added before it
 is known to be allowed, and removed with a separate `ZREM` if it was rejected.
 In the moment between the two, a concurrent request sees one entry too many and
 can be rejected too. The limiter can be stricter than `limit` under contention,
-never looser.
+never looser. A rejected request also costs a second round trip, so under a
+flood of rejected traffic Redis does twice the work.
 
 `now` comes from the application server's clock. If two servers disagree by a
 second, one of them sees entries a second older than they are. Keep the clocks
@@ -176,11 +181,14 @@ per second. A request takes one token, or is rejected if there is none.
 
 The state is a hash with the token count and the time of the last update. The
 refill depends on the previous state, which `MULTI` cannot express, so the
-logic runs as a Lua script. Redis runs a script atomically. The script is sent
-once with `EVAL`. After that, the client calls it by SHA1 with `EVALSHA`.
+logic runs as a Lua script. Redis runs a script atomically. The client calls
+the script by its SHA1 with `EVALSHA`, and sends the full body with `EVAL` only
+when Redis answers that it does not have it cached, as after a restart or a
+failover.
 
 The script reads the time with Redis `TIME`, so all application servers share
-one clock.
+one clock. If that clock goes backwards, which NTP or a failover to a node with
+a slower clock can cause, the script counts it as no time passing.
 
 The key expires when the bucket would be full again. A missing key reads as a
 full bucket.
