@@ -47,11 +47,12 @@ func TestConcurrentRequests(t *testing.T) {
 }
 
 // Requests of 4, 4, 4 and 2 against a limit of 10: the third does not fit,
-// and must not use up the 2 that the fourth needs.
-func TestAllowN(t *testing.T) {
+// and must not use up the 2 that the fourth needs. Reset gives all 10 back.
+func TestAllowNAndReset(t *testing.T) {
 	rdb := redisClient(t)
 	limiters := map[string]interface {
 		AllowN(context.Context, string, int) (Result, error)
+		Reset(context.Context, string) error
 	}{
 		"fixed window":   NewFixedWindow(rdb, 10, time.Minute),
 		"sliding window": NewSlidingWindow(rdb, 10, time.Minute),
@@ -76,6 +77,12 @@ func TestAllowN(t *testing.T) {
 			}
 			if _, err := lim.AllowN(context.Background(), key, 11); err != ErrExceedsLimit {
 				t.Fatalf("n > limit: got err %v, want ErrExceedsLimit", err)
+			}
+			if err := lim.Reset(context.Background(), key); err != nil {
+				t.Fatal(err)
+			}
+			if res, err := lim.AllowN(context.Background(), key, 10); err != nil || !res.Allowed {
+				t.Fatalf("after Reset: got allowed=%v err=%v, want the full limit back", res.Allowed, err)
 			}
 		})
 	}

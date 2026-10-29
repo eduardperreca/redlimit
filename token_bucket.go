@@ -87,3 +87,8 @@ func (l *TokenBucket) AllowN(ctx context.Context, key string, n int) (Result, er
 		RetryAfter: time.Duration(v[3]) * time.Microsecond,
 	}, nil
 }
+
+// Reset forgets every request made with key, as after a successful login.
+func (l *TokenBucket) Reset(ctx context.Context, key string) error {
+	return l.rdb.Del(ctx, l.opts.key(key, "tb")).Err()
+}

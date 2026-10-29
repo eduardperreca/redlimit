@@ -85,3 +85,8 @@ func (l *FixedWindow) AllowN(ctx context.Context, key string, n int) (Result, er
 	}
 	return res, nil
 }
+
+// Reset forgets every request made with key, as after a successful login.
+func (l *FixedWindow) Reset(ctx context.Context, key string) error {
+	return l.rdb.Del(ctx, l.opts.key(key, "fw")).Err()
+}

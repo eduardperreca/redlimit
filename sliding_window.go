@@ -79,3 +79,8 @@ func (l *SlidingWindow) AllowN(ctx context.Context, key string, n int) (Result, 
 		ResetIn:    l.window,
 	}, nil
 }
+
+// Reset forgets every request made with key, as after a successful login.
+func (l *SlidingWindow) Reset(ctx context.Context, key string) error {
+	return l.rdb.Del(ctx, l.opts.key(key, "sw")).Err()
+}
