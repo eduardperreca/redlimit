@@ -8,7 +8,7 @@ import (
 )
 
 // TokenBucket gives each key a bucket of burst tokens that refills at rate
-// tokens per second. A request takes one token.
+// tokens per second. A request takes one token, or n with AllowN.
 //
 // The whole decision runs in a Lua script, which Redis executes atomically.
 // The script reads the time from Redis, so the clocks of application servers
@@ -36,6 +36,7 @@ func NewTokenBucket(rdb redis.UniversalClient, rate float64, burst int, opts ...
 var tokenBucketScript = redis.NewScript(`
 local rate = tonumber(ARGV[1])
 local burst = tonumber(ARGV[2])
+local n = tonumber(ARGV[3])
 local t = redis.call('TIME')
 local now = t[1] * 1000000 + t[2]
 
@@ -48,11 +49,11 @@ tokens = math.min(burst, tokens + math.max(0, now - ts) / 1000000 * rate)
 
 local allowed = 0
 local retry = 0
-if tokens >= 1 then
-  tokens = tokens - 1
+if tokens >= n then
+  tokens = tokens - n
   allowed = 1
 else
-  retry = math.ceil((1 - tokens) / rate * 1000000)
+  retry = math.ceil((n - tokens) / rate * 1000000)
 end
 
 local full = math.ceil((burst - tokens) / rate * 1000000)
@@ -63,9 +64,18 @@ return {allowed, math.floor(tokens), full, retry}
 
 // Allow implements Limiter.
 func (l *TokenBucket) Allow(ctx context.Context, key string) (Result, error) {
+	return l.AllowN(ctx, key, 1)
+}
+
+// AllowN is Allow for a request that takes n tokens at once. It returns
+// ErrExceedsLimit if n > burst, and panics if n < 1.
+func (l *TokenBucket) AllowN(ctx context.Context, key string, n int) (Result, error) {
+	if err := checkN(n, l.burst); err != nil {
+		return Result{Limit: l.burst}, err
+	}
 	// Run sends EVALSHA and falls back to EVAL when Redis has not cached the
 	// script yet, so the script body crosses the network only once per node.
-	v, err := tokenBucketScript.Run(ctx, l.rdb, []string{l.opts.key(key, "tb")}, l.rate, l.burst).Int64Slice()
+	v, err := tokenBucketScript.Run(ctx, l.rdb, []string{l.opts.key(key, "tb")}, l.rate, l.burst, n).Int64Slice()
 	if err != nil {
 		return l.opts.failed(l.burst), err
 	}

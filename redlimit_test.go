@@ -46,6 +46,41 @@ func TestConcurrentRequests(t *testing.T) {
 	}
 }
 
+// Requests of 4, 4, 4 and 2 against a limit of 10: the third does not fit,
+// and must not use up the 2 that the fourth needs.
+func TestAllowN(t *testing.T) {
+	rdb := redisClient(t)
+	limiters := map[string]interface {
+		AllowN(context.Context, string, int) (Result, error)
+	}{
+		"fixed window":   NewFixedWindow(rdb, 10, time.Minute),
+		"sliding window": NewSlidingWindow(rdb, 10, time.Minute),
+		"token bucket":   NewTokenBucket(rdb, 0.01, 10),
+	}
+	for name, lim := range limiters {
+		t.Run(name, func(t *testing.T) {
+			key := t.Name() + strconv.FormatInt(time.Now().UnixNano(), 10)
+			for i, want := range []struct {
+				n         int
+				allowed   bool
+				remaining int
+			}{{4, true, 6}, {4, true, 2}, {4, false, 2}, {2, true, 0}} {
+				res, err := lim.AllowN(context.Background(), key, want.n)
+				if err != nil || res.Allowed != want.allowed || res.Remaining != want.remaining {
+					t.Fatalf("request %d: got allowed=%v remaining=%d err=%v, want allowed=%v remaining=%d",
+						i, res.Allowed, res.Remaining, err, want.allowed, want.remaining)
+				}
+				if !res.Allowed && res.RetryAfter <= 0 {
+					t.Fatalf("request %d: rejected with RetryAfter %v", i, res.RetryAfter)
+				}
+			}
+			if _, err := lim.AllowN(context.Background(), key, 11); err != ErrExceedsLimit {
+				t.Fatalf("n > limit: got err %v, want ErrExceedsLimit", err)
+			}
+		})
+	}
+}
+
 // A failover can hand the bucket to a node whose clock is behind the one that
 // last wrote it. Time going backwards must not take tokens away.
 func TestTokenBucketClockBackwards(t *testing.T) {

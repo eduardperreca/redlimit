@@ -57,8 +57,17 @@ return {1, limit - count - n, 0}
 
 // Allow implements Limiter.
 func (l *SlidingWindow) Allow(ctx context.Context, key string) (Result, error) {
+	return l.AllowN(ctx, key, 1)
+}
+
+// AllowN is Allow for a request that counts as n. It returns ErrExceedsLimit
+// if n > limit, and panics if n < 1.
+func (l *SlidingWindow) AllowN(ctx context.Context, key string, n int) (Result, error) {
+	if err := checkN(n, l.limit); err != nil {
+		return Result{Limit: l.limit}, err
+	}
 	v, err := slidingWindowScript.Run(ctx, l.rdb, []string{l.opts.key(key, "sw")},
-		l.window.Microseconds(), l.limit, 1, strconv.FormatUint(rand.Uint64(), 36)).Int64Slice()
+		l.window.Microseconds(), l.limit, n, strconv.FormatUint(rand.Uint64(), 36)).Int64Slice()
 	if err != nil {
 		return l.opts.failed(l.limit), err
 	}

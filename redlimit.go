@@ -3,6 +3,7 @@ package redlimit
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -13,6 +14,11 @@ import (
 type Limiter interface {
 	Allow(ctx context.Context, key string) (Result, error)
 }
+
+// ErrExceedsLimit is returned by AllowN when n is larger than the limit, or
+// than the burst of a token bucket. Such a request can never be allowed, so it
+// is rejected whatever the fail mode, without asking Redis.
+var ErrExceedsLimit = errors.New("redlimit: n exceeds the limit")
 
 // Result describes the outcome of a single Allow call.
 type Result struct {
@@ -62,6 +68,18 @@ func checkWindow(limit int, window time.Duration) {
 	if limit < 1 || window < time.Millisecond {
 		panic("redlimit: window limiters need limit >= 1 and window >= 1ms")
 	}
+}
+
+// checkN validates the n passed to AllowN. n < 1 is a programming error;
+// n > limit can come from user input, so it is an error instead of a panic.
+func checkN(n, limit int) error {
+	if n < 1 {
+		panic("redlimit: AllowN needs n >= 1")
+	}
+	if n > limit {
+		return ErrExceedsLimit
+	}
+	return nil
 }
 
 func (o options) failed(limit int) Result {
