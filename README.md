@@ -113,7 +113,7 @@ Seconds are rounded up.
 |                | Burst at most  | Redis memory per key   | Atomicity      | Clock          |
 | -------------- | -------------- | ---------------------- | -------------- | -------------- |
 | Fixed window   | `2 * limit`    | one counter            | single command | none (TTL)     |
-| Sliding window | `limit`        | one entry per request  | `MULTI`/`EXEC` | client         |
+| Sliding window | `limit`        | one entry per request  | Lua script     | Redis `TIME`   |
 | Token bucket   | `burst`        | one hash, two fields   | Lua script     | Redis `TIME`   |
 
 Fixed window is the cheapest. Sliding window is exact, but memory grows with the
@@ -147,30 +147,26 @@ short burst.
 
 `NewSlidingWindow(rdb, limit, window)`
 
-Each request is an entry in a sorted set, scored by its timestamp. A request is
-allowed if fewer than `limit` entries are younger than `window`.
+Each allowed request is an entry in a sorted set, scored by its timestamp. A
+request is allowed if fewer than `limit` entries are younger than `window`.
+The check runs as a Lua script, one round trip:
 
 ```
-MULTI
 ZREMRANGEBYSCORE rl:{key}:sw -inf <now - window>
-ZADD             rl:{key}:sw <now> <now>-<random>
 ZCARD            rl:{key}:sw
-ZRANGE           rl:{key}:sw 0 0 WITHSCORES
-PEXPIRE          rl:{key}:sw <window>
-EXEC
+ZADD             rl:{key}:sw <now> <random>      only if allowed
+PEXPIRE          rl:{key}:sw <window>            only if allowed
 ```
 
-`MULTI` queues the commands and runs them with nothing else in between, but it
-cannot use one command's result in the next. So the request is added before it
-is known to be allowed, and removed with a separate `ZREM` if it was rejected.
-In the moment between the two, a concurrent request sees one entry too many and
-can be rejected too. The limiter can be stricter than `limit` under contention,
-never looser. A rejected request also costs a second round trip, so under a
-flood of rejected traffic Redis does twice the work.
+An earlier version used `MULTI`/`EXEC` instead. `MULTI` queues commands and
+runs them with nothing else in between, but it cannot use one command's result
+in the next. So the request had to be added before it was known to be allowed,
+and removed with a separate `ZREM` if it was rejected. That cost a second round
+trip for every rejected request, and in the moment between the two, concurrent
+requests saw one entry too many. A script can check first and add after.
 
-`now` comes from the application server's clock. If two servers disagree by a
-second, one of them sees entries a second older than they are. Keep the clocks
-in sync with NTP, or use the token bucket.
+`now` is read with Redis `TIME`, as in the token bucket, so the clocks of the
+application servers do not matter.
 
 ### Token bucket
 

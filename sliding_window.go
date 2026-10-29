@@ -11,9 +11,9 @@ import (
 
 // SlidingWindow allows up to limit requests per key in any window-long span.
 //
-// Every request is stored in a sorted set, scored by the time the client read
-// from its own clock. Application servers whose clocks disagree will count the
-// same span differently.
+// Every allowed request is stored in a sorted set, scored by the time Redis
+// read from its own clock. The decision runs in a Lua script, so it is exact
+// under concurrency.
 type SlidingWindow struct {
 	rdb    redis.UniversalClient
 	limit  int
@@ -23,55 +23,50 @@ type SlidingWindow struct {
 
 // NewSlidingWindow returns a limiter that allows limit requests in any
 // window-long span. Memory grows with limit: one sorted set entry per request.
-// It panics if limit < 1 or window < 1ms.
+// It needs Redis 7.0 or later. It panics if limit < 1 or window < 1ms.
 func NewSlidingWindow(rdb redis.UniversalClient, limit int, window time.Duration, opts ...Option) *SlidingWindow {
 	checkWindow(limit, window)
 	return &SlidingWindow{rdb: rdb, limit: limit, window: window, opts: newOptions(opts)}
 }
 
+// Times are in microseconds. Members only need to be unique, and ARGV[4] is
+// a random string from the client: Redis seeds math.random the same way on
+// every call.
+var slidingWindowScript = redis.NewScript(`
+local window = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local n = tonumber(ARGV[3])
+local t = redis.call('TIME')
+local now = t[1] * 1000000 + t[2]
+
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - window)
+local count = redis.call('ZCARD', KEYS[1])
+if count + n > limit then
+  -- There is room for n once the oldest count + n - limit entries have aged out.
+  local i = count + n - limit - 1
+  local z = redis.call('ZRANGE', KEYS[1], i, i, 'WITHSCORES')
+  return {0, limit - count, z[2] + window - now}
+end
+
+for i = 1, n do
+  redis.call('ZADD', KEYS[1], now, ARGV[4] .. '-' .. i)
+end
+redis.call('PEXPIRE', KEYS[1], math.ceil(window / 1000))
+return {1, limit - count - n, 0}
+`)
+
 // Allow implements Limiter.
 func (l *SlidingWindow) Allow(ctx context.Context, key string) (Result, error) {
-	k := l.opts.key(key, "sw")
-	now := time.Now().UnixMicro()
-	// Concurrent requests can read the same microsecond, so the member needs a
-	// random part. Otherwise ZADD would overwrite instead of add.
-	member := strconv.FormatInt(now, 10) + "-" + strconv.FormatUint(rand.Uint64(), 36)
-
-	var count *redis.IntCmd
-	var oldest *redis.ZSliceCmd
-	// MULTI/EXEC runs the commands as one unit, but cannot branch on their
-	// results. The request is added before we know whether it is allowed.
-	_, err := l.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
-		p.ZRemRangeByScore(ctx, k, "-inf", strconv.FormatInt(now-l.window.Microseconds(), 10))
-		p.ZAdd(ctx, k, redis.Z{Score: float64(now), Member: member})
-		count = p.ZCard(ctx, k)
-		oldest = p.ZRangeWithScores(ctx, k, 0, 0)
-		p.PExpire(ctx, k, l.window)
-		return nil
-	})
+	v, err := slidingWindowScript.Run(ctx, l.rdb, []string{l.opts.key(key, "sw")},
+		l.window.Microseconds(), l.limit, 1, strconv.FormatUint(rand.Uint64(), 36)).Int64Slice()
 	if err != nil {
 		return l.opts.failed(l.limit), err
 	}
-
-	n := int(count.Val())
-	res := Result{
-		Allowed:   n <= l.limit,
-		Limit:     l.limit,
-		Remaining: max(l.limit-n, 0),
-		ResetIn:   l.window,
-	}
-	if res.Allowed {
-		return res, nil
-	}
-
-	// A rejected request must not use up the limit, so take it back out. Until
-	// then it is counted, and a concurrent request can be rejected because of
-	// it. That errs on the strict side: it never lets more than limit through.
-	// If ZREM fails, the entry ages out with the window like any other; the
-	// rejection itself is still correct, so the error is not returned.
-	_ = l.rdb.ZRem(ctx, k, member).Err()
-	if z := oldest.Val(); len(z) > 0 {
-		res.RetryAfter = time.Duration(int64(z[0].Score)+l.window.Microseconds()-now) * time.Microsecond
-	}
-	return res, nil
+	return Result{
+		Allowed:    v[0] == 1,
+		Limit:      l.limit,
+		Remaining:  max(int(v[1]), 0), // negative if the limit was lowered
+		RetryAfter: time.Duration(v[2]) * time.Microsecond,
+		ResetIn:    l.window,
+	}, nil
 }
