@@ -38,6 +38,32 @@ if !res.Allowed {
 }
 ```
 
+A request can count as more than one, for example a batch of 25 items:
+
+```go
+res, err := lim.AllowN(ctx, "user:42", 25)
+```
+
+If `n` is larger than the limit, `AllowN` returns `redlimit.ErrExceedsLimit`
+and rejects the request, whatever the fail mode.
+
+`Reset` forgets a key's requests. With a limit on login attempts, call it after
+a successful login so that the user starts again from the full limit:
+
+```go
+lim := redlimit.NewFixedWindow(rdb, 5, 15*time.Minute, redlimit.FailClosed())
+
+if res, _ := lim.Allow(ctx, "login:"+username); !res.Allowed {
+	// too many attempts
+}
+if passwordOK {
+	lim.Reset(ctx, "login:"+username)
+}
+```
+
+`AllowN` and `Reset` are methods of each limiter type, not of the `Limiter`
+interface, which only has `Allow`.
+
 Limiters take a `redis.UniversalClient`, so `*redis.Client`, `*redis.ClusterClient`
 and the client returned by `redis.NewFailoverClient` all work.
 
@@ -138,6 +164,11 @@ PTTL    rl:{key}:fw
 `INCR` is atomic, so concurrent requests never over-count. `NX` sets the TTL
 only on a key that has none. Without it, every request would push the expiry
 back and the window would never close for a client that keeps sending.
+
+With `AllowN`, `INCR` becomes `INCRBY n`. When a request does not fit but the
+window still had room, the limiter takes the `n` back with `DECRBY`, so that a
+smaller request can still use that room. That is a second round trip, only for
+those requests.
 
 The cost of the simplicity: a client can send `limit` requests at the end of one
 window and `limit` more at the start of the next, so up to `2 * limit` in a
